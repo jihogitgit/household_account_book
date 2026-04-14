@@ -1,0 +1,14 @@
+# 거래내역 (개인정보)
+*.xlsx
+overrides.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# macOS
+.DS_Store
