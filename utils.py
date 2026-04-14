@@ -9,7 +9,7 @@ import msoffcrypto
 import pandas as pd
 
 OVERRIDES_PATH = Path(__file__).parent / "overrides.json"
-PASSWORD = "911017"
+BUDGETS_PATH = Path(__file__).parent / "budgets.json"
 
 # ── 색상 팔레트 ───────────────────────────────────────────────────────
 CAT_COLOR_PLOTLY = {
@@ -154,7 +154,7 @@ rules = [
 
 # ── 핵심 함수 ─────────────────────────────────────────────────────────
 
-def decrypt(source) -> io.BytesIO:
+def decrypt(source, password: str) -> io.BytesIO:
     """파일 경로(str/Path) 또는 file-like object → 복호화된 BytesIO"""
     if isinstance(source, (str, Path)):
         f = open(source, "rb")
@@ -164,7 +164,7 @@ def decrypt(source) -> io.BytesIO:
         should_close = False
     try:
         of = msoffcrypto.OfficeFile(f)
-        of.load_key(password=PASSWORD)
+        of.load_key(password=password)
         dec = io.BytesIO()
         of.decrypt(dec)
     finally:
@@ -184,9 +184,9 @@ def detect_account_name(filename: str) -> str:
     return stem or filename
 
 
-def load_excel(source, account_name: str) -> pd.DataFrame:
+def load_excel(source, account_name: str, password: str) -> pd.DataFrame:
     """복호화 → pd.read_excel(header=8) → _통장 컬럼 추가"""
-    dec = decrypt(source)
+    dec = decrypt(source, password)
     df = pd.read_excel(dec, engine="openpyxl", header=8)
     df["_통장"] = account_name
     return df
@@ -208,18 +208,79 @@ def categorize(row, overrides: dict) -> tuple:
 
 
 def apply_categorization(df: pd.DataFrame, overrides: dict) -> pd.DataFrame:
-    """원본 DataFrame에 분류 컬럼 적용, 날짜/금액 변환"""
+    """원본 DataFrame에 분류 컬럼 적용, 날짜/금액 변환.
+    성능: 단일 패스로 세 컬럼을 동시에 채워 df.apply(pd.Series) 오버헤드를 제거."""
     df = df.copy()
-    df = df.dropna(subset=["거래 일시"])
-    result = df.apply(lambda r: pd.Series(categorize(r, overrides)), axis=1)
-    df["대분류"]  = result[0]
-    df["소분류"]  = result[1]
-    df["IsFixed"] = result[2]
+    df = df.dropna(subset=["거래 일시"]).reset_index(drop=True)
+
+    n = len(df)
+    cat_main = [None] * n
+    cat_sub = [None] * n
+    cat_fixed = [False] * n
+
+    records = df.to_dict("records")
+    for i, row in enumerate(records):
+        m, s, f = categorize(row, overrides)
+        cat_main[i] = m
+        cat_sub[i] = s
+        cat_fixed[i] = f
+
+    df["대분류"] = cat_main
+    df["소분류"] = cat_sub
+    df["IsFixed"] = cat_fixed
     df["거래금액"] = pd.to_numeric(df["거래 금액"], errors="coerce")
     df["거래일시"] = pd.to_datetime(df["거래 일시"], errors="coerce")
     df["날짜"]    = df["거래일시"].dt.date
     df["연월"]    = df["거래일시"].dt.to_period("M").astype(str)
     return df.sort_values("거래일시", ascending=False).reset_index(drop=True)
+
+
+def detect_fixed_candidates(
+    df: pd.DataFrame,
+    window_months: int = 3,
+    amount_tol: float = 0.10,
+) -> pd.DataFrame:
+    """3개월 이상 연속으로 비슷한 금액(±amount_tol)이 출금된 적요를 IsFixed 후보로 반환.
+
+    Returns: DataFrame with columns [적요, 평균금액, 발생월수, 현재IsFixed]
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["적요", "평균금액", "발생월수", "현재IsFixed"])
+
+    exp = df[df["대분류"].isin(["고정지출", "변동지출", "기타"])].copy()
+    if exp.empty:
+        return pd.DataFrame(columns=["적요", "평균금액", "발생월수", "현재IsFixed"])
+
+    # 적요 + 연월 단위 합산
+    grp = exp.groupby(["적요", "연월"])["거래금액"].sum().reset_index()
+    agg = grp.groupby("적요").agg(
+        발생월수=("연월", "nunique"),
+        평균금액=("거래금액", "mean"),
+        표준편차=("거래금액", "std"),
+    ).reset_index()
+
+    # 변동계수 (|std / mean|); mean 0 또는 NaN 방지
+    mean_abs = agg["평균금액"].abs().replace(0, pd.NA)
+    agg["cv"] = (agg["표준편차"].abs() / mean_abs).fillna(0).astype(float)
+
+    # 현재 IsFixed 여부
+    fixed_by_jeok = (
+        exp.groupby("적요")["IsFixed"].max().astype(bool).to_dict()
+    )
+    agg["현재IsFixed"] = agg["적요"].map(fixed_by_jeok).fillna(False).astype(bool)
+
+    cand = agg[
+        (agg["발생월수"] >= window_months)
+        & (agg["cv"] <= amount_tol)
+        & (~agg["현재IsFixed"])
+    ].copy()
+
+    cand["평균금액"] = cand["평균금액"].round(0)
+    return (
+        cand[["적요", "평균금액", "발생월수", "현재IsFixed"]]
+        .sort_values("발생월수", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def build_monthly_kpis(df: pd.DataFrame, yearmonth: str) -> dict:
@@ -260,5 +321,24 @@ def load_overrides() -> dict:
 def save_overrides(overrides: dict) -> None:
     OVERRIDES_PATH.write_text(
         json.dumps(overrides, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def load_budgets() -> dict:
+    """{소분류: 월예산금액(int)} 로드. 파일이 없거나 깨지면 빈 dict."""
+    if BUDGETS_PATH.exists():
+        try:
+            raw = json.loads(BUDGETS_PATH.read_text(encoding="utf-8"))
+            return {str(k): int(v) for k, v in raw.items() if v is not None}
+        except Exception:
+            return {}
+    return {}
+
+
+def save_budgets(budgets: dict) -> None:
+    clean = {str(k): int(v) for k, v in budgets.items() if v and int(v) > 0}
+    BUDGETS_PATH.write_text(
+        json.dumps(clean, ensure_ascii=False, indent=2),
         encoding="utf-8"
     )

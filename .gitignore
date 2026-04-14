@@ -1,6 +1,10 @@
 # 거래내역 (개인정보)
 *.xlsx
 overrides.json
+budgets.json
+
+# Streamlit secrets (비밀번호)
+.streamlit/secrets.toml
 
 # Python
 __pycache__/
