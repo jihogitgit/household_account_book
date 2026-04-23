@@ -12,6 +12,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from database import get_db
+from tabs.investment import render_investment_tab
+from tabs.pension import render_pension_tab
+from tabs.savings import render_savings_tab
 from utils import (
     CAT_COLOR_PLOTLY, SUBCAT_COLORS,
     apply_categorization, build_monthly_kpis,
@@ -21,6 +25,15 @@ from utils import (
 )
 
 BASE_DIR = Path(__file__).parent
+
+
+def _normalize_db_df(df: pd.DataFrame) -> pd.DataFrame:
+    """DB에서 로드한 DataFrame을 앱 내부 형식으로 변환."""
+    df = df.rename(columns={"통장": "_통장", "거래유형": "거래 유형", "is_fixed": "IsFixed"})
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce").dt.date
+    df["IsFixed"] = df["IsFixed"].astype(bool)
+    return df
+
 
 # ── 기본 설정 ─────────────────────────────────────────────────────────
 st.set_page_config(
@@ -120,7 +133,7 @@ def _default_xlsx_password() -> str:
 
 # ── 사이드바 ──────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("💰 가계부")
+    st.title("💰 채지pt쀼 가계부")
     st.caption("토스뱅크 거래내역 자동 분류")
     st.divider()
 
@@ -193,11 +206,34 @@ with st.sidebar:
                     st.session_state.exp_month = months[0] if months else "전체"
                     st.session_state.inc_month = months[0] if months else "전체"
                     st.session_state.exp_cat = ["고정지출", "변동지출", "경조사"]
+                    # SQLite에 저장
+                    saved = get_db().save_transactions(st.session_state.df)
                     # 캐시에 저장 (새로고침 후 15분간 복원)
                     _c = _shared_cache()
                     _c["raw_df"] = raw
                     _c["df"] = st.session_state.df
-                    st.success(f"{len(st.session_state.df):,}건 로드 완료")
+                    st.success(f"{len(st.session_state.df):,}건 로드 완료 (신규 {saved}건 저장)")
+                    st.rerun()
+
+    # ── DB에서 불러오기 ──
+    _db = get_db()
+    if _db.has_transactions() and st.session_state.df is None:
+        st.divider()
+        st.subheader("💾 저장된 데이터")
+        months_in_db = _db.get_available_months()
+        st.caption(f"총 {len(months_in_db)}개월 저장됨 ({months_in_db[-1] if months_in_db else '—'} ~ {months_in_db[0] if months_in_db else '—'})")
+        if st.button("📂 DB에서 불러오기", use_container_width=True):
+            with st.spinner("불러오는 중..."):
+                loaded = _db.load_transactions()
+                if not loaded.empty:
+                    st.session_state.df = _normalize_db_df(loaded)
+                    st.session_state.raw_df = None
+                    months = sorted(st.session_state.df["연월"].unique(), reverse=True)
+                    st.session_state.selected_month = months[0] if months else None
+                    st.session_state.exp_month = months[0] if months else "전체"
+                    st.session_state.inc_month = months[0] if months else "전체"
+                    st.session_state.exp_cat = ["고정지출", "변동지출", "경조사"]
+                    st.success(f"{len(loaded):,}건 불러옴")
                     st.rerun()
 
     # ── 월 선택 & 로드 현황 ──
@@ -253,12 +289,14 @@ with st.sidebar:
 
 
 # ── 메인 탭 ───────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 대시보드",
     "💸 지출 내역",
     "💵 수입 내역",
     "🗂️ 카테고리 관리",
-    "📈 수익률",
+    "📈 투자",
+    "🏦 연금",
+    "💰 저축목표",
 ])
 
 # ── 데이터 없을 때 공통 안내 ──────────────────────────────────────────
@@ -743,33 +781,21 @@ with tab4:
 
 
 # ════════════════════════════════════════════════════════════════════════
-# Tab 5: 수익률 (준비중)
+# Tab 5: 투자
 # ════════════════════════════════════════════════════════════════════════
 with tab5:
-    st.subheader("📈 수익률 분석")
-    st.info(
-        "이 페이지는 추후 **주식/연금 수익률 추적** 기능이 추가될 예정입니다.\n\n"
-        "계획 중인 기능:\n"
-        "- 포트폴리오 자산 현황 입력\n"
-        "- 월별 투자 수익률 트래킹\n"
-        "- 연금 예상 수령액 시뮬레이션\n"
-        "- 목표 대비 저축률 진행도"
-    )
+    render_investment_tab()
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("주식 수익률", "—", help="준비 중")
-    with col2:
-        st.metric("연금 예상 수령액", "—", help="준비 중")
-    with col3:
-        # 현재 저축 현황은 계산 가능
-        if st.session_state.df is not None:
-            df = st.session_state.df
-            ym = st.session_state.selected_month
-            if ym:
-                savings = df[
-                    (df["연월"] == ym) & (df["소분류"] == "적금/저축")
-                ]["거래금액"].sum()
-                st.metric("이번 달 적금/저축", f"{abs(savings):,.0f}원")
-        else:
-            st.metric("이번 달 적금/저축", "—")
+
+# ════════════════════════════════════════════════════════════════════════
+# Tab 6: 연금
+# ════════════════════════════════════════════════════════════════════════
+with tab6:
+    render_pension_tab()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Tab 7: 저축목표
+# ════════════════════════════════════════════════════════════════════════
+with tab7:
+    render_savings_tab(st.session_state.df)

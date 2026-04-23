@@ -310,35 +310,20 @@ def build_monthly_kpis(df: pd.DataFrame, yearmonth: str) -> dict:
 
 
 def load_overrides() -> dict:
-    if OVERRIDES_PATH.exists():
-        try:
-            return json.loads(OVERRIDES_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+    from database import get_db
+    return get_db().get_overrides()
 
 
 def save_overrides(overrides: dict) -> None:
-    OVERRIDES_PATH.write_text(
-        json.dumps(overrides, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
+    from database import get_db
+    get_db().save_overrides(overrides)
 
 
 def load_budgets() -> dict:
-    """{소분류: 월예산금액(int)} 로드. 파일이 없거나 깨지면 빈 dict."""
-    if BUDGETS_PATH.exists():
-        try:
-            raw = json.loads(BUDGETS_PATH.read_text(encoding="utf-8"))
-            return {str(k): int(v) for k, v in raw.items() if v is not None}
-        except Exception:
-            return {}
-    return {}
+    from database import get_db
+    return get_db().get_budgets()
 
 
 def save_budgets(budgets: dict) -> None:
-    clean = {str(k): int(v) for k, v in budgets.items() if v and int(v) > 0}
-    BUDGETS_PATH.write_text(
-        json.dumps(clean, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
+    from database import get_db
+    get_db().save_budgets(budgets)

@@ -16,3 +16,20 @@ venv/
 
 # macOS
 .DS_Store
+
+.json
+.omc/project-memory.json
+.omc/sessions/9d201f24-2c26-487c-97bb-613e1464f543.json
+.omc/sessions/27d5b3b0-3fbb-40be-b67d-980428fe6aab.json
+.omc/state/agent-replay-7fab3223-caf8-47ce-8c3f-adf7adc9d2d6.jsonl
+.omc/state/hud-stdin-cache.json
+.omc/state/last-tool-error.json
+.omc/state/mission-state.json
+.omc/state/subagent-tracking.json
+.omc/state/checkpoints/checkpoint-2026-04-17T07-30-48-471Z.json
+.omc/state/checkpoints/checkpoint-2026-04-23T03-56-48-466Z.json
+.omc/state/sessions/27d5b3b0-3fbb-40be-b67d-980428fe6aab/hud-state.json
+.omc/state/sessions/7fab3223-caf8-47ce-8c3f-adf7adc9d2d6/hud-state.json
+.omc/state/sessions/9d201f24-2c26-487c-97bb-613e1464f543/hud-state.json
+_workspace/streamlit.log
+_workspace/streamlit.log
