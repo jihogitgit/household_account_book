@@ -154,6 +154,22 @@ class Database:
             count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
         return count > 0
 
+    def update_transaction_by_key(
+        self, 날짜: str, 통장: str, 적요: str, 거래금액: float, updates: dict
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE transactions
+                   SET 대분류=?, 소분류=?, is_fixed=?, 메모=?
+                   WHERE 날짜=? AND 통장=? AND 적요=? AND 거래금액=?""",
+                (
+                    updates.get("대분류"), updates.get("소분류"),
+                    int(bool(updates.get("IsFixed", False))),
+                    updates.get("메모", ""),
+                    날짜, 통장, 적요, 거래금액,
+                ),
+            )
+
     # ── Portfolio ─────────────────────────────────────────────────────────
     def get_assets(self) -> pd.DataFrame:
         with self._connect() as conn:

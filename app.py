@@ -514,25 +514,75 @@ with tab2:
             avg = filtered["거래금액"].mean()
             st.metric("평균 단가", f"{avg:,.0f}원" if not pd.isna(avg) else "—")
 
-        # 테이블
+        # 수정 가능 테이블
         show_cols = ["날짜", "적요", "거래 유형", "_통장", "대분류", "소분류", "IsFixed", "거래금액", "메모"]
+        if "메모" not in filtered.columns:
+            filtered = filtered.copy()
+            filtered["메모"] = ""
         display = filtered[show_cols].copy()
         display.columns = ["날짜", "적요", "거래유형", "통장", "대분류", "소분류", "고정여부", "거래금액", "메모"]
-        display["고정여부"] = display["고정여부"].map(lambda x: "✔" if x else "")
+        display["고정여부"] = display["고정여부"].astype(bool)
+        display["메모"] = display["메모"].fillna("").astype(str)
+        _orig_display = display.copy()
 
-        st.dataframe(
+        대분류_edit_opts = ["수입", "고정지출", "변동지출", "경조사", "내부이체", "기타", "미분류"]
+        edited = st.data_editor(
             display,
             width='stretch',
             hide_index=True,
             height=420,
+            disabled=["날짜", "적요", "거래유형", "통장", "거래금액"],
             column_config={
                 "날짜": st.column_config.DateColumn("날짜", format="YYYY-MM-DD"),
+                "대분류": st.column_config.SelectboxColumn("대분류", options=대분류_edit_opts),
+                "소분류": st.column_config.TextColumn("소분류"),
+                "고정여부": st.column_config.CheckboxColumn("고정여부"),
+                "메모": st.column_config.TextColumn("메모"),
                 "거래금액": st.column_config.NumberColumn("거래금액", format="%d원"),
             },
+            key=f"exp_editor_{f_month}",
         )
 
-        csv = display.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 CSV 다운로드", csv, "지출내역.csv", "text/csv")
+        col_save, col_csv = st.columns([1, 4])
+        with col_save:
+            if st.button("💾 수정 저장", type="primary", key="exp_save"):
+                _db_edit = get_db()
+                changed = 0
+                orig_indices = list(filtered.index)
+                for i, orig_row in enumerate(_orig_display.itertuples(index=False)):
+                    edit_row = edited.iloc[i]
+                    if (str(orig_row.대분류) != str(edit_row["대분류"]) or
+                            str(orig_row.소분류) != str(edit_row["소분류"]) or
+                            bool(orig_row.고정여부) != bool(edit_row["고정여부"]) or
+                            str(orig_row.메모) != str(edit_row["메모"] or "")):
+                        _db_edit.update_transaction_by_key(
+                            날짜=str(orig_row.날짜),
+                            통장=str(orig_row.통장),
+                            적요=str(orig_row.적요),
+                            거래금액=float(orig_row.거래금액),
+                            updates={
+                                "대분류": edit_row["대분류"],
+                                "소분류": edit_row["소분류"],
+                                "IsFixed": bool(edit_row["고정여부"]),
+                                "메모": str(edit_row["메모"] or ""),
+                            },
+                        )
+                        oi = orig_indices[i]
+                        st.session_state.df.at[oi, "대분류"] = edit_row["대분류"]
+                        st.session_state.df.at[oi, "소분류"] = edit_row["소분류"]
+                        st.session_state.df.at[oi, "IsFixed"] = bool(edit_row["고정여부"])
+                        st.session_state.df.at[oi, "메모"] = str(edit_row["메모"] or "")
+                        changed += 1
+                if changed:
+                    st.success(f"{changed}건 수정 완료!")
+                    st.rerun()
+                else:
+                    st.info("변경된 내용이 없습니다.")
+        with col_csv:
+            csv_export = _orig_display.copy()
+            csv_export["고정여부"] = csv_export["고정여부"].map(lambda x: "✔" if x else "")
+            csv = csv_export.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("📥 CSV 다운로드", csv, "지출내역.csv", "text/csv", key="exp_csv")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -563,19 +613,63 @@ with tab3:
             st.metric("주 수입원", main_source)
 
         show_cols = ["날짜", "적요", "거래 유형", "_통장", "소분류", "거래금액", "메모"]
+        if "메모" not in income_df.columns:
+            income_df = income_df.copy()
+            income_df["메모"] = ""
         disp = income_df[show_cols].copy()
         disp.columns = ["날짜", "적요", "거래유형", "통장", "소분류", "거래금액", "메모"]
+        disp["메모"] = disp["메모"].fillna("").astype(str)
+        _orig_income = disp.copy()
 
-        st.dataframe(
+        edited_inc = st.data_editor(
             disp,
             width='stretch',
             hide_index=True,
             height=400,
+            disabled=["날짜", "적요", "거래유형", "통장", "거래금액"],
             column_config={
                 "날짜": st.column_config.DateColumn("날짜", format="YYYY-MM-DD"),
+                "소분류": st.column_config.TextColumn("소분류"),
+                "메모": st.column_config.TextColumn("메모"),
                 "거래금액": st.column_config.NumberColumn("거래금액", format="%d원"),
             },
+            key=f"inc_editor_{i_month}",
         )
+
+        col_isave, col_icsv = st.columns([1, 4])
+        with col_isave:
+            if st.button("💾 수정 저장", type="primary", key="inc_save"):
+                _db_edit = get_db()
+                changed = 0
+                orig_indices = list(income_df.index)
+                for i, orig_row in enumerate(_orig_income.itertuples(index=False)):
+                    edit_row = edited_inc.iloc[i]
+                    if (str(orig_row.소분류) != str(edit_row["소분류"]) or
+                            str(orig_row.메모) != str(edit_row["메모"] or "")):
+                        _db_edit.update_transaction_by_key(
+                            날짜=str(orig_row.날짜),
+                            통장=str(orig_row.통장),
+                            적요=str(orig_row.적요),
+                            거래금액=float(orig_row.거래금액),
+                            updates={
+                                "대분류": "수입",
+                                "소분류": edit_row["소분류"],
+                                "IsFixed": False,
+                                "메모": str(edit_row["메모"] or ""),
+                            },
+                        )
+                        oi = orig_indices[i]
+                        st.session_state.df.at[oi, "소분류"] = edit_row["소분류"]
+                        st.session_state.df.at[oi, "메모"] = str(edit_row["메모"] or "")
+                        changed += 1
+                if changed:
+                    st.success(f"{changed}건 수정 완료!")
+                    st.rerun()
+                else:
+                    st.info("변경된 내용이 없습니다.")
+        with col_icsv:
+            csv_inc = _orig_income.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("📥 CSV 다운로드", csv_inc, "수입내역.csv", "text/csv", key="inc_csv")
 
         # 소분류별 수입 바차트
         if not income_df.empty:
