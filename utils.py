@@ -128,9 +128,11 @@ def detect_account_name(filename: str) -> str:
     """'토스뱅크_거래내역 _생활비.xlsx' → '생활비'"""
     stem = filename.replace("토스뱅크_거래내역", "").replace("_", "").replace(" ", "")
     stem = stem.replace(".xlsx", "").replace(".XLSX", "")
-    for name in ["생활비", "경조사", "급여통장", "비상금"]:
+    for name in ["생활비", "경조사", "비상금"]:
         if name in stem:
             return name
+    if "급여" in stem:
+        return "급여통장"
     return stem or filename
 
 
