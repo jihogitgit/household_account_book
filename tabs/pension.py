@@ -33,28 +33,37 @@ def render_pension_tab() -> None:
                 "은퇴 후 목표 월 생활비 (원)", min_value=0, step=100000,
                 value=int(cfg.get("목표월생활비", 3000000)),
             )
+            initial_accumulated = st.number_input(
+                "현재 적립액 (원)", min_value=0, step=100000,
+                value=int(cfg.get("초기적립액", 0)),
+                help="이미 납입·적립된 금액 (IRP, 연금저축 등)",
+            )
             if st.form_submit_button("💾 계산 & 저장", type="primary", use_container_width=True):
                 db.save_pension_config({
                     "현재나이": current_age, "은퇴나이": retire_age,
                     "수령나이": receive_age, "월납입액": monthly_pay,
                     "예상수익률": rate, "국민연금_예상월액": national_pension,
-                    "목표월생활비": monthly_expense,
+                    "목표월생활비": monthly_expense, "초기적립액": initial_accumulated,
                 })
                 st.rerun()
+
+    if retire_age > receive_age:
+        st.warning(f"⚠️ 은퇴 나이({retire_age}세)가 연금 수령 시작 나이({receive_age}세)보다 늦습니다. 은퇴 후 수령 전 공백기간은 적립금에서 충당됩니다.")
 
     # ── 계산 ────────────────────────────────────────────────────────────
     accum_years  = max(retire_age - current_age, 0)
     recv_years   = max(90 - receive_age, 0)
     monthly_rate = rate / 12 / 100
 
-    if monthly_rate > 0 and monthly_pay > 0 and accum_years > 0:
-        accumulated = (
-            monthly_pay
-            * ((1 + monthly_rate) ** (accum_years * 12) - 1)
-            / monthly_rate
+    if monthly_rate > 0 and accum_years > 0:
+        fv_initial = initial_accumulated * (1 + monthly_rate) ** (accum_years * 12)
+        fv_payments = (
+            monthly_pay * ((1 + monthly_rate) ** (accum_years * 12) - 1) / monthly_rate
+            if monthly_pay > 0 else 0
         )
+        accumulated = fv_initial + fv_payments
     else:
-        accumulated = monthly_pay * accum_years * 12
+        accumulated = initial_accumulated + monthly_pay * accum_years * 12
 
     if monthly_rate > 0 and recv_years > 0:
         denom = 1 - (1 + monthly_rate) ** (-recv_years * 12)
@@ -64,7 +73,8 @@ def render_pension_tab() -> None:
     else:
         monthly_from_pension = 0
 
-    total_monthly = monthly_from_pension + national_pension
+    np_eligible   = receive_age >= 65
+    total_monthly = monthly_from_pension + (national_pension if np_eligible else 0)
     shortage      = max(0, monthly_expense - total_monthly)
 
     # 부족분 메우기 위한 추가 월납입액 역산
@@ -87,7 +97,9 @@ def render_pension_tab() -> None:
         c2.metric("개인연금 월수령액",     f"{monthly_from_pension:,.0f}원")
         c3, c4 = st.columns(2)
         c3.metric("총 월수령액",           f"{total_monthly:,.0f}원",
-                  help="개인연금 + 국민연금")
+                  help="개인연금 + 국민연금 (국민연금은 수령나이 65세 이상일 때 포함)")
+        if not np_eligible:
+            st.caption(f"💡 국민연금은 65세부터 수령 — 현재 수령 시작 나이({receive_age}세) 기준 총액에서 제외됨")
         if shortage > 0:
             c4.metric("목표 대비 부족액",  f"{shortage:,.0f}원/월",
                       delta=f"-{shortage:,.0f}원", delta_color="inverse")
@@ -111,10 +123,15 @@ def render_pension_tab() -> None:
         values = []
         for a in ages:
             y = a - current_age
-            if monthly_rate > 0 and monthly_pay > 0:
-                v = monthly_pay * ((1 + monthly_rate) ** (y * 12) - 1) / monthly_rate
+            if monthly_rate > 0:
+                fv_init = initial_accumulated * (1 + monthly_rate) ** (y * 12)
+                fv_pay = (
+                    monthly_pay * ((1 + monthly_rate) ** (y * 12) - 1) / monthly_rate
+                    if monthly_pay > 0 else 0
+                )
+                v = fv_init + fv_pay
             else:
-                v = monthly_pay * y * 12
+                v = initial_accumulated + monthly_pay * y * 12
             values.append(v)
 
         recv_end_age = min(90, retire_age + recv_years)

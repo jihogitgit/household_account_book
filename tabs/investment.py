@@ -105,6 +105,23 @@ def _render_portfolio() -> None:
         )
         st.dataframe(disp, use_container_width=True, hide_index=True)
 
+        with st.expander("✏️ 현재가 빠른 수정", expanded=False):
+            st.caption("현재가를 수정하고 저장 버튼을 누르면 즉시 반영됩니다.")
+            for _, asset in assets.iterrows():
+                c1, c2, c3 = st.columns([3, 2, 1])
+                c1.write(f"**{asset['자산명']}** ({asset['유형']})")
+                new_price = c2.number_input(
+                    "현재가", value=float(asset["현재가"]),
+                    key=f"price_{asset['id']}", label_visibility="collapsed",
+                    step=100,
+                )
+                if c3.button("저장", key=f"save_price_{asset['id']}"):
+                    updated = asset.to_dict()
+                    updated["현재가"] = new_price
+                    db.upsert_asset(updated)
+                    st.success(f"'{asset['자산명']}' 현재가 {new_price:,.0f}원 저장 완료")
+                    st.rerun()
+
         del_name = st.selectbox("삭제할 자산", [""] + assets["자산명"].tolist(), key="del_asset")
         if del_name and st.button("🗑️ 삭제", key="del_asset_btn"):
             row = assets[assets["자산명"] == del_name].iloc[0]

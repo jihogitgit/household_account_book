@@ -16,6 +16,7 @@ from database import get_db
 from tabs.investment import render_investment_tab
 from tabs.pension import render_pension_tab
 from tabs.savings import render_savings_tab
+from tabs.uncategorized import render_uncategorized_tab
 from utils import (
     CAT_COLOR_PLOTLY, SUBCAT_COLORS,
     apply_categorization, build_monthly_kpis,
@@ -84,12 +85,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_resource(ttl=900)  # 15분간 서버 메모리에 유지
-def _shared_cache():
-    """페이지 새로고침 후에도 DataFrame을 15분간 보존하는 공유 캐시."""
-    return {"raw_df": None, "df": None}
-
-
 # ── Session State 초기화 ──────────────────────────────────────────────
 if "overrides" not in st.session_state:
     st.session_state.overrides = load_overrides()
@@ -109,18 +104,6 @@ if "exp_cat" not in st.session_state:
 if "inc_month" not in st.session_state:
     st.session_state.inc_month = "전체"
 
-# ── 새로고침 후 캐시 복원 (15분 이내) ──────────────────────────────────
-_cache = _shared_cache()
-if st.session_state.df is None and _cache.get("df") is not None:
-    st.session_state.raw_df = _cache["raw_df"]
-    st.session_state.df = _cache["df"]
-    _months = sorted(st.session_state.df["연월"].unique(), reverse=True)
-    if st.session_state.selected_month is None and _months:
-        st.session_state.selected_month = _months[0]
-    if st.session_state.exp_month == "전체" and _months:
-        st.session_state.exp_month = _months[0]
-    if st.session_state.inc_month == "전체" and _months:
-        st.session_state.inc_month = _months[0]
 
 
 def _default_xlsx_password() -> str:
@@ -133,7 +116,7 @@ def _default_xlsx_password() -> str:
 
 # ── 사이드바 ──────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("💰 채지pt쀼 가계부")
+    st.title("💰 가계부")
     st.caption("토스뱅크 거래내역 자동 분류")
     st.divider()
 
@@ -207,12 +190,11 @@ with st.sidebar:
                     st.session_state.inc_month = months[0] if months else "전체"
                     st.session_state.exp_cat = ["고정지출", "변동지출", "경조사"]
                     # SQLite에 저장
-                    saved = get_db().save_transactions(st.session_state.df)
-                    # 캐시에 저장 (새로고침 후 15분간 복원)
-                    _c = _shared_cache()
-                    _c["raw_df"] = raw
-                    _c["df"] = st.session_state.df
-                    st.success(f"{len(st.session_state.df):,}건 로드 완료 (신규 {saved}건 저장)")
+                    inserted, skipped = get_db().save_transactions(st.session_state.df)
+                    msg = f"{len(st.session_state.df):,}건 로드 완료 (신규 {inserted}건 저장)"
+                    if skipped:
+                        msg += f", {skipped}건 중복 스킵"
+                    st.success(msg)
                     st.rerun()
 
     # ── DB에서 불러오기 ──
@@ -289,7 +271,7 @@ with st.sidebar:
 
 
 # ── 메인 탭 ───────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊 대시보드",
     "💸 지출 내역",
     "💵 수입 내역",
@@ -297,6 +279,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📈 투자",
     "🏦 연금",
     "💰 저축목표",
+    "❓ 미분류",
 ])
 
 # ── 데이터 없을 때 공통 안내 ──────────────────────────────────────────
@@ -382,7 +365,7 @@ with tab1:
 
         with col_left:
             st.subheader(f"📎 {ym} 지출 구성")
-            month_df = df[(df["연월"] == ym) & df["대분류"].isin(["고정지출", "변동지출", "경조사"])]
+            month_df = df[(df["연월"] == ym) & df["대분류"].isin(["고정지출", "변동지출", "경조사", "기타"])]
             if month_df.empty:
                 st.info("해당 월 지출 데이터가 없습니다.")
             else:
@@ -413,14 +396,21 @@ with tab1:
             idx = all_months.index(ym) if ym in all_months else len(all_months) - 1
             recent = all_months[max(0, idx - 5): idx + 1]
 
-            m_income, m_fixed, m_var, m_event, m_net = [], [], [], [], []
-            for m in recent:
-                k = build_monthly_kpis(df, m)
-                m_income.append(k["총수입"])
-                m_fixed.append(abs(k["고정지출"]))
-                m_var.append(abs(k["변동지출"]))
-                m_event.append(abs(k["경조사"]))
-                m_net.append(k["순수지"])
+            recent_df = df[df["연월"].isin(recent) & ~df["대분류"].isin(["내부이체"])]
+            kpi_pivot = (
+                recent_df.groupby(["연월", "대분류"])["거래금액"]
+                .sum()
+                .unstack(fill_value=0)
+                .reindex(recent, fill_value=0)
+                .reindex(columns=["수입", "고정지출", "변동지출", "경조사"], fill_value=0)
+            )
+            m_income = kpi_pivot["수입"].tolist()
+            m_fixed  = kpi_pivot["고정지출"].abs().tolist()
+            m_var    = kpi_pivot["변동지출"].abs().tolist()
+            m_event  = kpi_pivot["경조사"].abs().tolist()
+            m_net    = (
+                kpi_pivot["수입"] + kpi_pivot["고정지출"] + kpi_pivot["변동지출"] + kpi_pivot["경조사"]
+            ).tolist()
 
             fig_bar = go.Figure()
             fig_bar.add_bar(x=recent, y=m_income, name="수입",    marker_color="#A8E6A8")
@@ -433,6 +423,13 @@ with tab1:
                 line=dict(color="#1A2E4A", width=2, dash="dot"),
                 marker=dict(size=7),
             )
+            if ym in recent:
+                sel_idx = recent.index(ym)
+                fig_bar.add_vrect(
+                    x0=sel_idx - 0.45, x1=sel_idx + 0.45,
+                    fillcolor="#FFF3B0", opacity=0.4, line_width=0,
+                    annotation_text=ym, annotation_position="top left",
+                )
             fig_bar.update_layout(
                 barmode="relative",
                 legend=dict(orientation="h", y=-0.2),
@@ -486,7 +483,9 @@ with tab2:
         acct_opts   = sorted(df["_통장"].unique().tolist())
 
         with fc1:
-            f_month = st.selectbox("월", all_months_opt, key="exp_month")
+            sel_month = st.session_state.get("selected_month")
+            exp_idx = all_months_opt.index(sel_month) if sel_month in all_months_opt else 0
+            f_month = st.selectbox("월", all_months_opt, index=exp_idx, key="exp_month")
         with fc2:
             f_cat = st.multiselect("대분류", 대분류_opts, key="exp_cat")
         with fc3:
@@ -497,8 +496,8 @@ with tab2:
         filtered = df.copy()
         if f_month != "전체":
             filtered = filtered[filtered["연월"] == f_month]
-        if f_cat:
-            filtered = filtered[filtered["대분류"].isin(f_cat)]
+        active_cats = f_cat if f_cat else 대분류_opts
+        filtered = filtered[filtered["대분류"].isin(active_cats)]
         if f_subcat:
             filtered = filtered[filtered["소분류"].isin(f_subcat)]
         if f_acct:
@@ -507,7 +506,7 @@ with tab2:
         # 소계
         s1, s2, s3 = st.columns(3)
         with s1:
-            st.metric("합계 금액", f"{filtered['거래금액'].sum():,.0f}원")
+            st.metric("합계 금액", f"{abs(filtered['거래금액'].sum()):,.0f}원")
         with s2:
             st.metric("건 수", f"{len(filtered):,}건")
         with s3:
@@ -525,6 +524,7 @@ with tab2:
         display["메모"] = display["메모"].fillna("").astype(str)
         _orig_display = display.copy()
 
+        st.caption("⚠️ 월 필터를 변경하면 편집 중인 내용이 초기화됩니다.")
         대분류_edit_opts = ["수입", "고정지출", "변동지출", "경조사", "내부이체", "기타", "미분류"]
         edited = st.data_editor(
             display,
@@ -540,7 +540,7 @@ with tab2:
                 "메모": st.column_config.TextColumn("메모"),
                 "거래금액": st.column_config.NumberColumn("거래금액", format="%d원"),
             },
-            key=f"exp_editor_{f_month}",
+            key="exp_editor_main",
         )
 
         col_save, col_csv = st.columns([1, 4])
@@ -595,7 +595,9 @@ with tab3:
         df = st.session_state.df
         all_months_opt = ["전체"] + sorted(df["연월"].unique(), reverse=True)
 
-        i_month = st.selectbox("월 선택", all_months_opt, key="inc_month")
+        sel_month_inc = st.session_state.get("selected_month")
+        inc_idx = all_months_opt.index(sel_month_inc) if sel_month_inc in all_months_opt else 0
+        i_month = st.selectbox("월 선택", all_months_opt, index=inc_idx, key="inc_month")
 
         income_df = df[df["대분류"] == "수입"]
         if i_month != "전체":
@@ -633,7 +635,7 @@ with tab3:
                 "메모": st.column_config.TextColumn("메모"),
                 "거래금액": st.column_config.NumberColumn("거래금액", format="%d원"),
             },
-            key=f"inc_editor_{i_month}",
+            key="inc_editor_main",
         )
 
         col_isave, col_icsv = st.columns([1, 4])
@@ -706,24 +708,29 @@ with tab4:
 
     if st.session_state.df is not None:
         all_적요 = sorted(st.session_state.df["적요"].dropna().unique().tolist())
+        거래유형_list = sorted(st.session_state.df["거래 유형"].dropna().unique().tolist())
     else:
         all_적요 = []
+        거래유형_list = []
 
     with st.form("override_form", clear_on_submit=True):
-        ov1, ov2, ov3, ov4 = st.columns(4)
+        ov1, ov2, ov3, ov4, ov5 = st.columns(5)
         with ov1:
             target = st.selectbox("적요 선택", [""] + all_적요, key="ov_target")
         with ov2:
-            new_대분류 = st.selectbox("대분류", 대분류_list, key="ov_main")
+            new_거래유형 = st.selectbox("거래유형", [""] + 거래유형_list, key="ov_gtype")
         with ov3:
-            new_소분류 = st.text_input("소분류", placeholder="예) 식비", key="ov_sub")
+            new_대분류 = st.selectbox("대분류", 대분류_list, key="ov_main")
         with ov4:
+            new_소분류 = st.text_input("소분류", placeholder="예) 식비", key="ov_sub")
+        with ov5:
             new_fixed = st.checkbox("IsFixed (고정 지출)", key="ov_fixed")
             st.write("")  # 높이 맞춤
             submitted = st.form_submit_button("💾 저장", width='stretch')
 
         if submitted and target:
-            st.session_state.overrides[target] = {
+            key = (target, new_거래유형 or "")
+            st.session_state.overrides[key] = {
                 "대분류": new_대분류,
                 "소분류": new_소분류 or new_대분류,
                 "IsFixed": new_fixed,
@@ -743,11 +750,18 @@ with tab4:
     overrides = st.session_state.overrides
 
     if overrides:
-        ov_df = pd.DataFrame([
-            {"적요": k, "대분류": v["대분류"], "소분류": v["소분류"],
-             "IsFixed": bool(v.get("IsFixed", False))}
-            for k, v in overrides.items()
-        ])
+        ov_rows = []
+        for k, v in overrides.items():
+            if isinstance(k, tuple):
+                jeok, gtype = k
+            else:
+                jeok, gtype = k, ""
+            ov_rows.append({
+                "적요": jeok, "거래유형": gtype,
+                "대분류": v["대분류"], "소분류": v["소분류"],
+                "IsFixed": bool(v.get("IsFixed", False)),
+            })
+        ov_df = pd.DataFrame(ov_rows)
 
         edited = st.data_editor(
             ov_df,
@@ -762,8 +776,10 @@ with tab4:
         if st.button("변경 사항 적용", type="secondary"):
             new_ov = {}
             for _, row in edited.iterrows():
-                if pd.notna(row.get("적요")) and str(row["적요"]).strip():
-                    new_ov[str(row["적요"])] = {
+                jeok = str(row.get("적요", "")).strip()
+                gtype = str(row.get("거래유형", "")).strip()
+                if jeok:
+                    new_ov[(jeok, gtype)] = {
                         "대분류": row["대분류"],
                         "소분류": row["소분류"],
                         "IsFixed": bool(row["IsFixed"]),
@@ -828,7 +844,7 @@ with tab4:
                 targets = sel
 
             if targets:
-                # 현재 분류 결과에서 각 적요의 (대분류, 소분류)를 가져와 IsFixed=True로 세팅
+                # 현재 분류 결과에서 각 적요의 (대분류, 소분류, 거래유형)를 가져와 IsFixed=True로 세팅
                 cur_df = st.session_state.df
                 for jeok in targets:
                     sub_rows = cur_df[cur_df["적요"] == jeok]
@@ -836,10 +852,11 @@ with tab4:
                         continue
                     대 = sub_rows["대분류"].mode().iat[0] if not sub_rows["대분류"].mode().empty else "고정지출"
                     소 = sub_rows["소분류"].mode().iat[0] if not sub_rows["소분류"].mode().empty else 대
+                    gtype = sub_rows["거래 유형"].mode().iat[0] if not sub_rows["거래 유형"].mode().empty else ""
                     # 변동지출/기타에서 올라온 경우 대분류도 고정지출로 격상
                     if 대 in ("변동지출", "기타"):
                         대 = "고정지출"
-                    st.session_state.overrides[jeok] = {
+                    st.session_state.overrides[(jeok, gtype)] = {
                         "대분류": 대,
                         "소분류": 소,
                         "IsFixed": True,
@@ -856,22 +873,8 @@ with tab4:
 
     st.divider()
 
-    # ── E: 미분류 항목 ──
-    st.subheader("⚠️ 미분류 항목")
-    if st.session_state.df is not None:
-        uncat = (
-            st.session_state.df[st.session_state.df["대분류"] == "미분류"]
-            [["적요", "거래 유형", "_통장", "거래금액"]]
-            .drop_duplicates("적요")
-            .sort_values("거래금액")
-        )
-        if uncat.empty:
-            st.success("미분류 항목이 없습니다! ✅")
-        else:
-            st.warning(f"{len(uncat)}개의 미분류 항목이 있습니다.")
-            st.dataframe(uncat, width='stretch', hide_index=True)
-    else:
-        st.info("데이터를 먼저 로드해주세요.")
+    # ── E: 미분류 항목 바로가기 ──
+    st.info("⚠️ 미분류 분류는 **❓ 미분류** 탭에서 처리할 수 있습니다.")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -893,3 +896,10 @@ with tab6:
 # ════════════════════════════════════════════════════════════════════════
 with tab7:
     render_savings_tab(st.session_state.df)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Tab 8: 미분류
+# ════════════════════════════════════════════════════════════════════════
+with tab8:
+    render_uncategorized_tab()
